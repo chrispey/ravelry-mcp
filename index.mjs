@@ -621,6 +621,30 @@ app.post('/message', express.json(), async (req, res) => {
 
 app.get('/health', (req, res) => res.json({ status: 'ok', tools: 'full' }));
 
+app.get('/.well-known/oauth-authorization-server', (req, res) => {
+  const base = `https://${req.headers.host}`;
+  res.json({
+    issuer: base,
+    authorization_endpoint: `${base}/authorize`,
+    token_endpoint: `${base}/token`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code']
+  });
+});
+
+app.get('/authorize', (req, res) => {
+  const { redirect_uri, state } = req.query;
+  res.redirect(`${redirect_uri}?code=ravelry-mcp-code&state=${state}`);
+});
+
+app.post('/token', express.urlencoded({ extended: true }), (req, res) => {
+  res.json({
+    access_token: 'ravelry-mcp-token',
+    token_type: 'bearer',
+    expires_in: 86400
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`[ravelry-mcp] Running on port ${PORT}`);
   console.log(`[ravelry-mcp] SSE: http://localhost:${PORT}/sse`);
