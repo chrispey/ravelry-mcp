@@ -1,6 +1,6 @@
 import express from 'express';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
 
 const PORT = process.env.PORT || 8080;
@@ -18,23 +18,46 @@ let cachedUsername = null;
 
 async function get(path) {
   const res = await fetch(`${RAVELRY_BASE}${path}`, { headers: { Authorization: authHeader } });
-  if (!res.ok) throw new Error(`Ravelry ${res.status} on ${path}`);
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Ravelry ${res.status} on ${path}${errText ? ` — ${errText.slice(0, 500)}` : ''}`);
+  }
   return res.json();
 }
 
 async function post(path, body = {}) {
+  const form = new URLSearchParams();
+  for (const [k, v] of Object.entries(body)) {
+    if (v === undefined || v === null) continue;
+    if (Array.isArray(v)) {
+      for (const item of v) form.append(`${k}[]`, String(item));
+    } else if (typeof v === 'boolean') {
+      form.set(k, v ? '1' : '0');
+    } else {
+      form.set(k, String(v));
+    }
+  }
   const res = await fetch(`${RAVELRY_BASE}${path}`, {
     method: 'POST',
-    headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    headers: {
+      Authorization: authHeader,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: form.toString()
   });
-  if (!res.ok) throw new Error(`Ravelry ${res.status} on ${path}`);
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Ravelry ${res.status} on ${path}${errText ? ` — ${errText.slice(0, 500)}` : ''}`);
+  }
   return res.json();
 }
 
 async function del(path) {
   const res = await fetch(`${RAVELRY_BASE}${path}`, { method: 'DELETE', headers: { Authorization: authHeader } });
-  if (!res.ok) throw new Error(`Ravelry ${res.status} on ${path}`);
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Ravelry ${res.status} on ${path}${errText ? ` — ${errText.slice(0, 500)}` : ''}`);
+  }
   return res.json();
 }
 
@@ -50,7 +73,7 @@ function text(data) {
 }
 
 function createServer() {
-  const server = new McpServer({ name: 'Ravelry', version: '2.0.0' });
+  const server = new McpServer({ name: 'Ravelry', version: '2.0.1' });
 
   // ACCOUNT
   server.tool('get_current_user', 'Get the current authenticated user profile', {}, async () =>
@@ -96,7 +119,7 @@ function createServer() {
     skeins: z.number().optional()
   }, async (params) => {
     const u = await getUsername();
-    return text(await post(`/people/${u}/queue/create.json`, { data: params }));
+    return text(await post(`/people/${u}/queue/create.json`, params));
   });
 
   server.tool('queue_update', 'Update a queued project', {
@@ -109,10 +132,10 @@ function createServer() {
     skeins: z.number().optional()
   }, async ({ id, ...data }) => {
     const u = await getUsername();
-    return text(await post(`/people/${u}/queue/${id}/update.json`, { data }));
+    return text(await post(`/people/${u}/queue/${id}/update.json`, data));
   });
 
-  server.tool('queue_remove', 'DESTRUCTIVE: permanently delete a queued project', {
+  server.tool('queue_remove', 'DESTRUCTIVE — permanently delete a queued project', {
     id: z.number()
   }, async ({ id }) => {
     const u = await getUsername();
@@ -165,7 +188,7 @@ function createServer() {
     tag_list: z.string().optional().describe('Space-delimited tags')
   }, async (params) => {
     const u = await getUsername();
-    return text(await post(`/people/${u}/stash/create.json`, { data: params }));
+    return text(await post(`/people/${u}/stash/create.json`, params));
   });
 
   server.tool('stash_update', 'Update a stash entry', {
@@ -176,10 +199,10 @@ function createServer() {
     tag_list: z.string().optional()
   }, async ({ id, ...data }) => {
     const u = await getUsername();
-    return text(await post(`/people/${u}/stash/${id}.json`, { data }));
+    return text(await post(`/people/${u}/stash/${id}.json`, data));
   });
 
-  server.tool('stash_remove', 'DESTRUCTIVE: permanently delete a stash entry', {
+  server.tool('stash_remove', 'DESTRUCTIVE — permanently delete a stash entry', {
     id: z.number()
   }, async ({ id }) => {
     const u = await getUsername();
@@ -231,7 +254,7 @@ function createServer() {
     tag_names: z.array(z.string()).optional()
   }, async (data) => {
     const u = await getUsername();
-    return text(await post(`/projects/${u}/create.json`, { data }));
+    return text(await post(`/projects/${u}/create.json`, data));
   });
 
   server.tool('project_update', 'Update a project', {
@@ -246,10 +269,10 @@ function createServer() {
     tag_names: z.array(z.string()).optional()
   }, async ({ id, ...data }) => {
     const u = await getUsername();
-    return text(await post(`/projects/${u}/${id}.json`, { data }));
+    return text(await post(`/projects/${u}/${id}.json`, data));
   });
 
-  server.tool('project_delete', 'DESTRUCTIVE: permanently delete a project', {
+  server.tool('project_delete', 'DESTRUCTIVE — permanently delete a project', {
     id: z.union([z.number(), z.string()])
   }, async ({ id }) => {
     const u = await getUsername();
@@ -286,7 +309,7 @@ function createServer() {
     tag_list: z.string().optional()
   }, async (data) => {
     const u = await getUsername();
-    return text(await post(`/people/${u}/favorites/create.json`, { data }));
+    return text(await post(`/people/${u}/favorites/create.json`, data));
   });
 
   server.tool('favorite_update', 'Update a favorite comment or tags', {
@@ -295,10 +318,10 @@ function createServer() {
     tag_list: z.string().optional()
   }, async ({ id, ...data }) => {
     const u = await getUsername();
-    return text(await post(`/people/${u}/favorites/${id}.json`, { data }));
+    return text(await post(`/people/${u}/favorites/${id}.json`, data));
   });
 
-  server.tool('favorite_remove', 'DESTRUCTIVE: delete a favorite', {
+  server.tool('favorite_remove', 'DESTRUCTIVE — delete a favorite', {
     id: z.number()
   }, async ({ id }) => {
     const u = await getUsername();
@@ -325,9 +348,9 @@ function createServer() {
     pattern_id: z.number().optional(),
     pattern_source_id: z.number().optional(),
     notes: z.string().optional()
-  }, async (data) => text(await post('/volumes/create.json', { data })));
+  }, async (data) => text(await post('/volumes/create.json', data)));
 
-  server.tool('library_remove', 'DESTRUCTIVE: remove a volume from your library', {
+  server.tool('library_remove', 'DESTRUCTIVE — remove a volume from your library', {
     volume_id: z.number()
   }, async ({ volume_id }) => text(await del(`/volumes/${volume_id}.json`)));
 
@@ -372,7 +395,7 @@ function createServer() {
     notes: z.string().optional()
   }, async (data) => {
     const u = await getUsername();
-    return text(await post(`/people/${u}/bundles/create.json`, { data }));
+    return text(await post(`/people/${u}/bundles/create.json`, data));
   });
 
   server.tool('bundle_update', 'Update a bundle', {
@@ -381,10 +404,10 @@ function createServer() {
     notes: z.string().optional()
   }, async ({ id, ...data }) => {
     const u = await getUsername();
-    return text(await post(`/people/${u}/bundles/${id}.json`, { data }));
+    return text(await post(`/people/${u}/bundles/${id}.json`, data));
   });
 
-  server.tool('bundle_delete', 'DESTRUCTIVE: delete a bundle', {
+  server.tool('bundle_delete', 'DESTRUCTIVE — delete a bundle', {
     id: z.number()
   }, async ({ id }) => {
     const u = await getUsername();
@@ -480,7 +503,7 @@ function createServer() {
     page: z.number().optional().default(1),
     page_size: z.number().optional().default(25)
   }, async ({ query, page, page_size }) => {
-    const p = new URLSearchParams({ query, page: String(page), page_number: String(page_size) });
+    const p = new URLSearchParams({ query, page: String(page), page_size: String(page_size) });
     return text(await get(`/pattern_sources/search.json?${p}`));
   });
 
@@ -548,13 +571,13 @@ function createServer() {
     recipient_username: z.string(),
     subject: z.string(),
     content: z.string().describe('Markdown supported')
-  }, async (data) => text(await post('/messages/create.json', { data })));
+  }, async (data) => text(await post('/messages/create.json', data)));
 
   server.tool('message_reply', 'Reply to a message', {
     id: z.number().describe('Message ID to reply to'),
     subject: z.string(),
     content: z.string()
-  }, async ({ id, ...data }) => text(await post(`/messages/${id}/reply.json`, { data })));
+  }, async ({ id, ...data }) => text(await post(`/messages/${id}/reply.json`, data)));
 
   server.tool('message_mark_read', 'Mark a message as read', {
     id: z.number()
@@ -564,7 +587,7 @@ function createServer() {
     id: z.number()
   }, async ({ id }) => text(await post(`/messages/${id}/archive.json`)));
 
-  server.tool('message_delete', 'DESTRUCTIVE: permanently delete a message', {
+  server.tool('message_delete', 'DESTRUCTIVE — permanently delete a message', {
     id: z.number()
   }, async ({ id }) => text(await del(`/messages/${id}.json`)));
 
@@ -574,7 +597,7 @@ function createServer() {
     body: z.string().describe('Markdown supported')
   }, async (data) => text(await post('/comments/create.json', data)));
 
-  server.tool('comment_delete', 'DESTRUCTIVE: delete a comment', {
+  server.tool('comment_delete', 'DESTRUCTIVE — delete a comment', {
     id: z.number()
   }, async ({ id }) => text(await del(`/comments/${id}.json`)));
 
@@ -601,91 +624,27 @@ function createServer() {
   return server;
 }
 
-// ============================================================
-// TRANSPORT: Streamable HTTP (stateless)
-// Single POST endpoint at /mcp. New server+transport per request.
-// Server is stateless by design (tools are read-through to Ravelry).
-// ============================================================
-
 const app = express();
-app.use(express.json());
+const transports = new Map();
 
-app.post('/mcp', async (req, res) => {
-  try {
-    const server = createServer();
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined, // stateless
-    });
-    res.on('close', () => {
-      transport.close();
-      server.close();
-    });
-    await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
-  } catch (err) {
-    console.error('[ravelry-mcp] /mcp error:', err);
-    if (!res.headersSent) {
-      res.status(500).json({
-        jsonrpc: '2.0',
-        error: { code: -32603, message: 'Internal error' },
-        id: null,
-      });
-    }
-  }
+app.get('/sse', async (req, res) => {
+  const server = createServer();
+  const transport = new SSEServerTransport('/message', res);
+  transports.set(transport.sessionId, transport);
+  res.on('close', () => transports.delete(transport.sessionId));
+  await server.connect(transport);
+  console.log(`[ravelry-mcp] Connected: ${transport.sessionId}`);
 });
 
-// Stateless mode: reject GET/DELETE politely so probe clients get a clear answer
-app.get('/mcp', (req, res) => {
-  res.status(405).json({
-    jsonrpc: '2.0',
-    error: { code: -32000, message: 'Method not allowed. Use POST for Streamable HTTP.' },
-    id: null,
-  });
+app.post('/message', express.json(), async (req, res) => {
+  const transport = transports.get(req.query.sessionId);
+  if (!transport) { res.status(400).json({ error: 'Unknown session' }); return; }
+  await transport.handlePostMessage(req, res);
 });
 
-app.delete('/mcp', (req, res) => {
-  res.status(405).json({
-    jsonrpc: '2.0',
-    error: { code: -32000, message: 'Method not allowed.' },
-    id: null,
-  });
-});
-
-app.get('/health', (req, res) =>
-  res.json({ status: 'ok', tools: 'full', transport: 'streamable-http' })
-);
-
-// ============================================================
-// OAUTH PASS-THROUGH (unchanged from v1)
-// These worked in the SSE version per Chrispey's report.
-// ============================================================
-
-app.get('/.well-known/oauth-authorization-server', (req, res) => {
-  const base = `https://${req.headers.host}`;
-  res.json({
-    issuer: base,
-    authorization_endpoint: `${base}/authorize`,
-    token_endpoint: `${base}/token`,
-    response_types_supported: ['code'],
-    grant_types_supported: ['authorization_code'],
-  });
-});
-
-app.get('/authorize', (req, res) => {
-  const { redirect_uri, state } = req.query;
-  res.redirect(`${redirect_uri}?code=ravelry-mcp-code&state=${state}`);
-});
-
-app.post('/token', express.urlencoded({ extended: true }), (req, res) => {
-  res.json({
-    access_token: 'ravelry-mcp-token',
-    token_type: 'bearer',
-    expires_in: 86400,
-  });
-});
+app.get('/health', (req, res) => res.json({ status: 'ok', tools: 'full' }));
 
 app.listen(PORT, () => {
   console.log(`[ravelry-mcp] Running on port ${PORT}`);
-  console.log(`[ravelry-mcp] MCP (Streamable HTTP): POST http://localhost:${PORT}/mcp`);
-  console.log(`[ravelry-mcp] Health: GET http://localhost:${PORT}/health`);
+  console.log(`[ravelry-mcp] SSE: http://localhost:${PORT}/sse`);
 });
