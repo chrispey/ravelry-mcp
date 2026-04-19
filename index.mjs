@@ -1,6 +1,6 @@
 import express from 'express';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 
 const PORT = process.env.PORT || 8080;
@@ -18,7 +18,7 @@ let cachedUsername = null;
 
 async function get(path) {
   const res = await fetch(`${RAVELRY_BASE}${path}`, { headers: { Authorization: authHeader } });
-  if (!res.ok) throw new Error(`Ravelry ${res.status} — ${path}`);
+  if (!res.ok) throw new Error(`Ravelry ${res.status} on ${path}`);
   return res.json();
 }
 
@@ -28,13 +28,13 @@ async function post(path, body = {}) {
     headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
-  if (!res.ok) throw new Error(`Ravelry ${res.status} — ${path}`);
+  if (!res.ok) throw new Error(`Ravelry ${res.status} on ${path}`);
   return res.json();
 }
 
 async function del(path) {
   const res = await fetch(`${RAVELRY_BASE}${path}`, { method: 'DELETE', headers: { Authorization: authHeader } });
-  if (!res.ok) throw new Error(`Ravelry ${res.status} — ${path}`);
+  if (!res.ok) throw new Error(`Ravelry ${res.status} on ${path}`);
   return res.json();
 }
 
@@ -112,7 +112,7 @@ function createServer() {
     return text(await post(`/people/${u}/queue/${id}/update.json`, { data }));
   });
 
-  server.tool('queue_remove', 'DESTRUCTIVE — permanently delete a queued project', {
+  server.tool('queue_remove', 'DESTRUCTIVE: permanently delete a queued project', {
     id: z.number()
   }, async ({ id }) => {
     const u = await getUsername();
@@ -179,7 +179,7 @@ function createServer() {
     return text(await post(`/people/${u}/stash/${id}.json`, { data }));
   });
 
-  server.tool('stash_remove', 'DESTRUCTIVE — permanently delete a stash entry', {
+  server.tool('stash_remove', 'DESTRUCTIVE: permanently delete a stash entry', {
     id: z.number()
   }, async ({ id }) => {
     const u = await getUsername();
@@ -249,7 +249,7 @@ function createServer() {
     return text(await post(`/projects/${u}/${id}.json`, { data }));
   });
 
-  server.tool('project_delete', 'DESTRUCTIVE — permanently delete a project', {
+  server.tool('project_delete', 'DESTRUCTIVE: permanently delete a project', {
     id: z.union([z.number(), z.string()])
   }, async ({ id }) => {
     const u = await getUsername();
@@ -298,7 +298,7 @@ function createServer() {
     return text(await post(`/people/${u}/favorites/${id}.json`, { data }));
   });
 
-  server.tool('favorite_remove', 'DESTRUCTIVE — delete a favorite', {
+  server.tool('favorite_remove', 'DESTRUCTIVE: delete a favorite', {
     id: z.number()
   }, async ({ id }) => {
     const u = await getUsername();
@@ -327,7 +327,7 @@ function createServer() {
     notes: z.string().optional()
   }, async (data) => text(await post('/volumes/create.json', { data })));
 
-  server.tool('library_remove', 'DESTRUCTIVE — remove a volume from your library', {
+  server.tool('library_remove', 'DESTRUCTIVE: remove a volume from your library', {
     volume_id: z.number()
   }, async ({ volume_id }) => text(await del(`/volumes/${volume_id}.json`)));
 
@@ -384,7 +384,7 @@ function createServer() {
     return text(await post(`/people/${u}/bundles/${id}.json`, { data }));
   });
 
-  server.tool('bundle_delete', 'DESTRUCTIVE — delete a bundle', {
+  server.tool('bundle_delete', 'DESTRUCTIVE: delete a bundle', {
     id: z.number()
   }, async ({ id }) => {
     const u = await getUsername();
@@ -564,7 +564,7 @@ function createServer() {
     id: z.number()
   }, async ({ id }) => text(await post(`/messages/${id}/archive.json`)));
 
-  server.tool('message_delete', 'DESTRUCTIVE — permanently delete a message', {
+  server.tool('message_delete', 'DESTRUCTIVE: permanently delete a message', {
     id: z.number()
   }, async ({ id }) => text(await del(`/messages/${id}.json`)));
 
@@ -574,7 +574,7 @@ function createServer() {
     body: z.string().describe('Markdown supported')
   }, async (data) => text(await post('/comments/create.json', data)));
 
-  server.tool('comment_delete', 'DESTRUCTIVE — delete a comment', {
+  server.tool('comment_delete', 'DESTRUCTIVE: delete a comment', {
     id: z.number()
   }, async ({ id }) => text(await del(`/comments/${id}.json`)));
 
@@ -601,25 +601,64 @@ function createServer() {
   return server;
 }
 
+// ============================================================
+// TRANSPORT: Streamable HTTP (stateless)
+// Single POST endpoint at /mcp. New server+transport per request.
+// Server is stateless by design (tools are read-through to Ravelry).
+// ============================================================
+
 const app = express();
-const transports = new Map();
+app.use(express.json());
 
-app.get('/sse', async (req, res) => {
-  const server = createServer();
-  const transport = new SSEServerTransport('/message', res);
-  transports.set(transport.sessionId, transport);
-  res.on('close', () => transports.delete(transport.sessionId));
-  await server.connect(transport);
-  console.log(`[ravelry-mcp] Connected: ${transport.sessionId}`);
+app.post('/mcp', async (req, res) => {
+  try {
+    const server = createServer();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined, // stateless
+    });
+    res.on('close', () => {
+      transport.close();
+      server.close();
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (err) {
+    console.error('[ravelry-mcp] /mcp error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        jsonrpc: '2.0',
+        error: { code: -32603, message: 'Internal error' },
+        id: null,
+      });
+    }
+  }
 });
 
-app.post('/message', express.json(), async (req, res) => {
-  const transport = transports.get(req.query.sessionId);
-  if (!transport) { res.status(400).json({ error: 'Unknown session' }); return; }
-  await transport.handlePostMessage(req, res);
+// Stateless mode: reject GET/DELETE politely so probe clients get a clear answer
+app.get('/mcp', (req, res) => {
+  res.status(405).json({
+    jsonrpc: '2.0',
+    error: { code: -32000, message: 'Method not allowed. Use POST for Streamable HTTP.' },
+    id: null,
+  });
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok', tools: 'full' }));
+app.delete('/mcp', (req, res) => {
+  res.status(405).json({
+    jsonrpc: '2.0',
+    error: { code: -32000, message: 'Method not allowed.' },
+    id: null,
+  });
+});
+
+app.get('/health', (req, res) =>
+  res.json({ status: 'ok', tools: 'full', transport: 'streamable-http' })
+);
+
+// ============================================================
+// OAUTH PASS-THROUGH (unchanged from v1)
+// These worked in the SSE version per Chrispey's report.
+// ============================================================
 
 app.get('/.well-known/oauth-authorization-server', (req, res) => {
   const base = `https://${req.headers.host}`;
@@ -628,7 +667,7 @@ app.get('/.well-known/oauth-authorization-server', (req, res) => {
     authorization_endpoint: `${base}/authorize`,
     token_endpoint: `${base}/token`,
     response_types_supported: ['code'],
-    grant_types_supported: ['authorization_code']
+    grant_types_supported: ['authorization_code'],
   });
 });
 
@@ -641,11 +680,12 @@ app.post('/token', express.urlencoded({ extended: true }), (req, res) => {
   res.json({
     access_token: 'ravelry-mcp-token',
     token_type: 'bearer',
-    expires_in: 86400
+    expires_in: 86400,
   });
 });
 
 app.listen(PORT, () => {
   console.log(`[ravelry-mcp] Running on port ${PORT}`);
-  console.log(`[ravelry-mcp] SSE: http://localhost:${PORT}/sse`);
+  console.log(`[ravelry-mcp] MCP (Streamable HTTP): POST http://localhost:${PORT}/mcp`);
+  console.log(`[ravelry-mcp] Health: GET http://localhost:${PORT}/health`);
 });
