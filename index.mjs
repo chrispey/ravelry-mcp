@@ -1,8 +1,6 @@
 import express from 'express';
-import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
 const PORT = process.env.PORT || 8080;
@@ -75,7 +73,7 @@ function text(data) {
 }
 
 function createServer() {
-  const server = new McpServer({ name: 'Ravelry', version: '2.0.2' });
+  const server = new McpServer({ name: 'Ravelry', version: '2.0.3' });
 
   // ACCOUNT
   server.tool('get_current_user', 'Get the current authenticated user profile', {}, async () =>
@@ -629,44 +627,49 @@ function createServer() {
 const app = express();
 app.use(express.json());
 
-// Sessions keyed by MCP session ID
-const transports = {};
-
-// Streamable HTTP transport — single endpoint, handles POST (client→server), GET (SSE stream back), DELETE (close)
-app.all('/mcp', async (req, res) => {
-  const sessionId = req.headers['mcp-session-id'];
-  let transport;
-
-  if (sessionId && transports[sessionId]) {
-    transport = transports[sessionId];
-  } else if (!sessionId && req.method === 'POST' && isInitializeRequest(req.body)) {
-    transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (id) => {
-        transports[id] = transport;
-      }
-    });
-    transport.onclose = () => {
-      if (transport.sessionId) delete transports[transport.sessionId];
-    };
+// Stateless Streamable HTTP — each request creates its own transport + server
+// This avoids session-ID tracking issues with clients that don't manage sessions
+app.post('/mcp', async (req, res) => {
+  try {
     const server = createServer();
-    await server.connect(transport);
-  } else {
-    res.status(400).json({
-      jsonrpc: '2.0',
-      error: { code: -32000, message: 'Bad Request: missing or unknown session' },
-      id: null
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined  // stateless
     });
-    return;
+    res.on('close', () => {
+      transport.close();
+      server.close();
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (err) {
+    console.error('[ravelry-mcp] handler error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        jsonrpc: '2.0',
+        error: { code: -32603, message: 'Internal server error', data: String(err?.message || err) },
+        id: null
+      });
+    }
   }
-
-  await transport.handleRequest(req, res, req.body);
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok', tools: 'full' }));
+// GET and DELETE on /mcp are for session-based transports — return method not allowed in stateless mode
+app.get('/mcp', (req, res) => res.status(405).json({
+  jsonrpc: '2.0',
+  error: { code: -32000, message: 'Method not allowed (stateless server)' },
+  id: null
+}));
+
+app.delete('/mcp', (req, res) => res.status(405).json({
+  jsonrpc: '2.0',
+  error: { code: -32000, message: 'Method not allowed (stateless server)' },
+  id: null
+}));
+
+app.get('/health', (req, res) => res.json({ status: 'ok', tools: 'full', version: '2.0.3' }));
 
 app.listen(PORT, () => {
-  console.log(`[ravelry-mcp] Running on port ${PORT}`);
-  console.log(`[ravelry-mcp] MCP (Streamable HTTP): POST http://localhost:${PORT}/mcp`);
+  console.log(`[ravelry-mcp] v2.0.3 Running on port ${PORT}`);
+  console.log(`[ravelry-mcp] MCP (Streamable HTTP, stateless): POST http://localhost:${PORT}/mcp`);
   console.log(`[ravelry-mcp] Health: GET http://localhost:${PORT}/health`);
 });
