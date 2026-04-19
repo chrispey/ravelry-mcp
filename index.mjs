@@ -1,6 +1,8 @@
 import express from 'express';
+import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
 const PORT = process.env.PORT || 8080;
@@ -73,7 +75,7 @@ function text(data) {
 }
 
 function createServer() {
-  const server = new McpServer({ name: 'Ravelry', version: '2.0.1' });
+  const server = new McpServer({ name: 'Ravelry', version: '2.0.2' });
 
   // ACCOUNT
   server.tool('get_current_user', 'Get the current authenticated user profile', {}, async () =>
@@ -625,26 +627,46 @@ function createServer() {
 }
 
 const app = express();
-const transports = new Map();
+app.use(express.json());
 
-app.get('/sse', async (req, res) => {
-  const server = createServer();
-  const transport = new SSEServerTransport('/message', res);
-  transports.set(transport.sessionId, transport);
-  res.on('close', () => transports.delete(transport.sessionId));
-  await server.connect(transport);
-  console.log(`[ravelry-mcp] Connected: ${transport.sessionId}`);
-});
+// Sessions keyed by MCP session ID
+const transports = {};
 
-app.post('/message', express.json(), async (req, res) => {
-  const transport = transports.get(req.query.sessionId);
-  if (!transport) { res.status(400).json({ error: 'Unknown session' }); return; }
-  await transport.handlePostMessage(req, res);
+// Streamable HTTP transport — single endpoint, handles POST (client→server), GET (SSE stream back), DELETE (close)
+app.all('/mcp', async (req, res) => {
+  const sessionId = req.headers['mcp-session-id'];
+  let transport;
+
+  if (sessionId && transports[sessionId]) {
+    transport = transports[sessionId];
+  } else if (!sessionId && req.method === 'POST' && isInitializeRequest(req.body)) {
+    transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (id) => {
+        transports[id] = transport;
+      }
+    });
+    transport.onclose = () => {
+      if (transport.sessionId) delete transports[transport.sessionId];
+    };
+    const server = createServer();
+    await server.connect(transport);
+  } else {
+    res.status(400).json({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Bad Request: missing or unknown session' },
+      id: null
+    });
+    return;
+  }
+
+  await transport.handleRequest(req, res, req.body);
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok', tools: 'full' }));
 
 app.listen(PORT, () => {
   console.log(`[ravelry-mcp] Running on port ${PORT}`);
-  console.log(`[ravelry-mcp] SSE: http://localhost:${PORT}/sse`);
+  console.log(`[ravelry-mcp] MCP (Streamable HTTP): POST http://localhost:${PORT}/mcp`);
+  console.log(`[ravelry-mcp] Health: GET http://localhost:${PORT}/health`);
 });
